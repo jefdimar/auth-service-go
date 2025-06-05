@@ -2,15 +2,27 @@ package domain
 
 import (
 	"time"
+)
 
-	"golang.org/x/crypto/bcrypt"
+// Role represents user roles in the system
+type Role string
+
+const (
+	// RoleAdmin has full system access
+	RoleAdmin Role = "admin"
+	// RoleManager has limited administrative access
+	RoleManager Role = "manager"
+	// RoleUser has standard user access
+	RoleUser Role = "user"
+	// RoleViewer has read-only access
+	RoleViewer Role = "viewer"
 )
 
 // User represents a user in the system
 type User struct {
 	ID        string    `json:"id" db:"id"`
 	Email     string    `json:"email" db:"email"`
-	Password  string    `json:"-" db:"password"` // Never expose password in JSON
+	Password  string    `json:"-" db:"password"` // Never include in JSON responses
 	FirstName string    `json:"first_name" db:"first_name"`
 	LastName  string    `json:"last_name" db:"last_name"`
 	Role      string    `json:"role" db:"role"`
@@ -19,44 +31,49 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
-// UserRole defines user roles
-type UserRole string
+// GetFullName returns the user's full name
+func (u *User) GetFullName() string {
+	return u.FirstName + " " + u.LastName
+}
 
-const (
-	RoleAdmin   UserRole = "admin"
-	RoleUser    UserRole = "user"
-	RoleManager UserRole = "manager"
-	RoleViewer  UserRole = "viewer"
-)
-
-// HashPassword hashes the user's password
-func (u *User) HashPassword() error {
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
+// HasRole checks if the user has a specific role
+func (u *User) HasRole(role Role) bool {
+	userRole := Role(u.Role)
+	// Admin has access to everything
+	if userRole == RoleAdmin {
+		return true
 	}
-	u.Password = string(hashedPassword)
-	return nil
+	return userRole == role
 }
 
-// CheckPassword verifies if the provided password matches the user's password
-func (u *User) CheckPassword(password string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password))
-	return err == nil
+// IsAdmin checks if the user is an admin
+func (u *User) IsAdmin() bool {
+	return Role(u.Role) == RoleAdmin
 }
 
-// IsValidRole checks if the role is valid
-func (u *User) IsValidRole() bool {
-	validRoles := []UserRole{RoleAdmin, RoleUser, RoleManager, RoleViewer}
-	for _, role := range validRoles {
-		if UserRole(u.Role) == role {
+// IsManager checks if the user is a manager
+func (u *User) IsManager() bool {
+	return Role(u.Role) == RoleManager
+}
+
+// IsManagerOrAdmin checks if the user is a manager or admin
+func (u *User) IsManagerOrAdmin() bool {
+	role := Role(u.Role)
+	return role == RoleManager || role == RoleAdmin
+}
+
+// ValidRoles returns a slice of all valid roles
+func ValidRoles() []Role {
+	return []Role{RoleAdmin, RoleManager, RoleUser, RoleViewer}
+}
+
+// IsValidRole checks if a role string is valid
+func IsValidRole(role string) bool {
+	validRoles := ValidRoles()
+	for _, validRole := range validRoles {
+		if string(validRole) == role {
 			return true
 		}
 	}
 	return false
-}
-
-// GetFullName returns the user's full name
-func (u *User) GetFullName() string {
-	return u.FirstName + " " + u.LastName
 }

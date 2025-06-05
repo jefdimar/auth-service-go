@@ -10,13 +10,13 @@ import (
 	"auth-service-go/pkg/logger"
 )
 
-// AuthHandler handles authentication HTTP requests
+// AuthHandler handles authentication-related HTTP requests
 type AuthHandler struct {
 	authService *application.AuthService
 	logger      logger.Logger
 }
 
-// NewAuthHandler creates a new authentication handler
+// NewAuthHandler creates a new auth handler
 func NewAuthHandler(authService *application.AuthService) *AuthHandler {
 	return &AuthHandler{
 		authService: authService,
@@ -26,149 +26,274 @@ func NewAuthHandler(authService *application.AuthService) *AuthHandler {
 
 // Register handles user registration
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	h.logger.Info("Processing registration request")
+	h.logger.Info("Processing user registration request")
 
-	var req domain.RegisterRequest
+	var req application.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.logger.WithError(err).Warn("Invalid JSON in registration request")
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON format")
+		h.logger.WithError(err).Error("Failed to decode registration request")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	response, err := h.authService.Register(&req)
+	// Register user
+	user, err := h.authService.Register(req.Email, req.Password, req.FirstName, req.LastName, req.Role)
 	if err != nil {
-		h.handleServiceError(w, err, "Registration failed")
+		h.logger.WithError(err).Error("Failed to register user")
+
+		switch err {
+		case domain.ErrUserAlreadyExists:
+			http.Error(w, "User already exists", http.StatusConflict)
+		case domain.ErrInvalidInput:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			if err.Error() == "invalid input: invalid role" {
+				http.Error(w, "Invalid role specified", http.StatusBadRequest)
+			} else {
+				http.Error(w, "Registration failed", http.StatusInternalServerError)
+			}
+		}
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusCreated, response)
-	h.logger.WithField("user_id", response.User.ID).Info("User registered successfully")
+	// Convert to response format
+	userResponse := &application.UserResponse{
+		ID:        user.ID,
+		Email:     user.Email,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Role:      user.Role,
+		IsActive:  user.IsActive,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}
+
+	h.logger.WithField("user_id", user.ID).Info("User registered successfully")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "User registered successfully",
+		"data":    userResponse,
+	})
 }
 
-// Login handles user login
+// Login handles user authentication
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Processing login request")
 
-	var req domain.LoginRequest
+	var req application.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.logger.WithError(err).Warn("Invalid JSON in login request")
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON format")
+		h.logger.WithError(err).Error("Failed to decode login request")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	response, err := h.authService.Login(&req)
+	// Authenticate user
+	loginResponse, err := h.authService.Login(req.Email, req.Password)
 	if err != nil {
-		h.handleServiceError(w, err, "Login failed")
+		h.logger.WithError(err).Error("Login failed")
+
+		switch err {
+		case domain.ErrInvalidCredentials:
+			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		case domain.ErrUserInactive:
+			http.Error(w, "Account is inactive", http.StatusForbidden)
+		default:
+			http.Error(w, "Login failed", http.StatusInternalServerError)
+		}
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, response)
-	h.logger.WithField("user_id", response.User.ID).Info("User logged in successfully")
-}
-
-// RefreshToken handles token refresh
-func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
-	h.logger.Info("Processing token refresh request")
-
-	// Get token from Authorization header
-	token := h.extractTokenFromHeader(r)
-	if token == "" {
-		h.logger.Warn("No token provided for refresh")
-		h.writeErrorResponse(w, http.StatusUnauthorized, "Authorization token required")
-		return
+	// Convert user to response format
+	userResponse := &application.UserResponse{
+		ID:        loginResponse.User.ID,
+		Email:     loginResponse.User.Email,
+		FirstName: loginResponse.User.FirstName,
+		LastName:  loginResponse.User.LastName,
+		Role:      loginResponse.User.Role,
+		IsActive:  loginResponse.User.IsActive,
+		CreatedAt: loginResponse.User.CreatedAt,
+		UpdatedAt: loginResponse.User.UpdatedAt,
 	}
 
-	response, err := h.authService.RefreshToken(token)
-	if err != nil {
-		h.handleServiceError(w, err, "Token refresh failed")
-		return
+	response := &application.LoginResponse{
+		Token: loginResponse.Token,
+		User:  userResponse,
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, response)
-	h.logger.WithField("user_id", response.User.ID).Info("Token refreshed successfully")
+	h.logger.WithField("user_id", loginResponse.User.ID).Info("User logged in successfully")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Login successful",
+		"data":    response,
+	})
 }
 
 // GetProfile handles getting user profile
 func (h *AuthHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Processing get profile request")
 
-	// Get token from Authorization header
-	token := h.extractTokenFromHeader(r)
-	if token == "" {
-		h.logger.Warn("No token provided for profile")
-		h.writeErrorResponse(w, http.StatusUnauthorized, "Authorization token required")
+	// Get user from context (set by auth middleware)
+	user, ok := r.Context().Value("user").(*domain.User)
+	if !ok {
+		h.logger.Error("User not found in request context")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Get user from token
-	user, err := h.authService.GetUserByToken(token)
-	if err != nil {
-		h.handleServiceError(w, err, "Failed to get profile")
-		return
+	// Convert to response format
+	userResponse := &application.UserResponse{
+		ID:        user.ID,
+		Email:     user.Email,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Role:      user.Role,
+		IsActive:  user.IsActive,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
-		"user": user,
-	})
 	h.logger.WithField("user_id", user.ID).Info("Profile retrieved successfully")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Profile retrieved successfully",
+		"data":    userResponse,
+	})
 }
 
 // UpdateProfile handles updating user profile
 func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Processing update profile request")
 
-	// Get token from Authorization header
-	token := h.extractTokenFromHeader(r)
-	if token == "" {
-		h.logger.Warn("No token provided for profile update")
-		h.writeErrorResponse(w, http.StatusUnauthorized, "Authorization token required")
+	// Get user from context
+	user, ok := r.Context().Value("user").(*domain.User)
+	if !ok {
+		h.logger.Error("User not found in request context")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Get user from token
-	user, err := h.authService.GetUserByToken(token)
-	if err != nil {
-		h.handleServiceError(w, err, "Failed to authenticate user")
+	var req application.UpdateProfileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.WithError(err).Error("Failed to decode update profile request")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Parse update request
-	var updates map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
-		h.logger.WithError(err).Warn("Invalid JSON in profile update request")
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON format")
-		return
+	// Convert request to updates map
+	updates := make(map[string]interface{})
+	if req.Email != "" {
+		updates["email"] = req.Email
+	}
+	if req.FirstName != "" {
+		updates["first_name"] = req.FirstName
+	}
+	if req.LastName != "" {
+		updates["last_name"] = req.LastName
+	}
+	if req.Password != "" {
+		updates["password"] = req.Password
 	}
 
 	// Update profile
 	updatedUser, err := h.authService.UpdateUserProfile(user.ID, updates)
 	if err != nil {
-		h.handleServiceError(w, err, "Failed to update profile")
+		h.logger.WithError(err).Error("Failed to update profile")
+
+		switch err {
+		case domain.ErrUserAlreadyExists:
+			http.Error(w, "Email already exists", http.StatusConflict)
+		case domain.ErrUserNotFound:
+			http.Error(w, "User not found", http.StatusNotFound)
+		default:
+			http.Error(w, "Profile update failed", http.StatusInternalServerError)
+		}
 		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
-		"user": updatedUser,
+	// Convert to response format
+	userResponse := &application.UserResponse{
+		ID:        updatedUser.ID,
+		Email:     updatedUser.Email,
+		FirstName: updatedUser.FirstName,
+		LastName:  updatedUser.LastName,
+		Role:      updatedUser.Role,
+		IsActive:  updatedUser.IsActive,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+	}
+
+	h.logger.WithField("user_id", user.ID).Info("Profile updated successfully")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Profile updated successfully",
+		"data":    userResponse,
 	})
-	h.logger.WithField("user_id", updatedUser.ID).Info("Profile updated successfully")
 }
 
-// Logout handles user logout (client-side token invalidation)
+// RefreshToken handles token refresh
+func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("Processing token refresh request")
+
+	// Get user from context
+	user, ok := r.Context().Value("user").(*domain.User)
+	if !ok {
+		h.logger.Error("User not found in request context")
+		h.writeErrorResponse(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	// Generate new token
+	token, err := h.authService.RefreshToken(user.ID)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to refresh token")
+
+		switch err {
+		case domain.ErrUserNotFound:
+			h.writeErrorResponse(w, http.StatusNotFound, "User not found")
+		case domain.ErrUserInactive:
+			h.writeErrorResponse(w, http.StatusForbidden, "Account is inactive")
+		default:
+			h.writeErrorResponse(w, http.StatusInternalServerError, "Token refresh failed")
+		}
+		return
+	}
+
+	response := map[string]string{
+		"token": token,
+	}
+
+	h.logger.WithField("user_id", user.ID).Info("Token refreshed successfully")
+	h.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"message": "Token refreshed successfully",
+		"data":    response,
+	})
+}
+
+// Logout handles user logout (token invalidation)
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("Processing logout request")
 
-	// For JWT tokens, logout is typically handled client-side by removing the token
-	// We can log the event for audit purposes
-	token := h.extractTokenFromHeader(r)
-	if token != "" {
-		user, err := h.authService.GetUserByToken(token)
-		if err == nil {
-			h.logger.WithField("user_id", user.ID).Info("User logged out")
-		}
+	// Get user from context
+	user, ok := r.Context().Value("user").(*domain.User)
+	if !ok {
+		h.logger.Error("User not found in request context")
+		h.writeErrorResponse(w, http.StatusUnauthorized, "Unauthorized")
+		return
 	}
 
-	h.writeJSONResponse(w, http.StatusOK, map[string]string{
+	// For JWT tokens, we can't really "invalidate" them server-side without a blacklist
+	// For now, we'll just return success and let the client discard the token
+	// In production, you might want to implement a token blacklist in Redis
+
+	h.logger.WithField("user_id", user.ID).Info("User logged out successfully")
+	h.writeJSONResponse(w, http.StatusOK, map[string]interface{}{
 		"message": "Logged out successfully",
+		"data": map[string]string{
+			"message": "Please discard your token on the client side",
+		},
 	})
 }
 
